@@ -1,0 +1,24 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Install FFmpeg and yt-dlp dependencies
+RUN apk add --no-cache ffmpeg python3 py3-pip wget curl
+
+# Install yt-dlp (stable release)
+RUN pip3 install --no-cache-dir yt-dlp
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm install
+
+# Set environment to development
+ENV NODE_ENV=development
+
+# Expose port
+EXPOSE 3000
+
+# Run in development mode with hot-reload
+CMD ["npm", "run", "dev"] 

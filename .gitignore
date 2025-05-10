@@ -1,0 +1,68 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Build output
+dist/
+build/
+
+# Videos storage
+uploads/
+**/uploads/
+**/*.mp4
+**/*.webm
+**/*.mkv
+**/*.avi
+**/*.m4a
+**/*.mp3
+
+# Database
+*.sqlite
+*.db
+*.postgres
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime*
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini 
+
+# Cookies
+cookies.txt

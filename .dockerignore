@@ -1,0 +1,36 @@
+# Exclude node_modules
+node_modules
+
+# Exclude existing uploads and logs
+uploads/*
+logs/*
+
+# Exclude build artifacts
+dist
+build
+
+# Exclude git related files
+.git
+.gitignore
+.github
+
+# Exclude dotenv files
+.env*
+!.env.example
+
+# Exclude IDE files
+.vscode
+.idea
+*.swp
+*.swo
+
+# Exclude markdown files
+*.md
+!README.md
+
+# Exclude misc files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db 

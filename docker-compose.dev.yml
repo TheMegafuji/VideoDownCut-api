@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: videodowncut:dev
+    container_name: videodowncut-api-dev
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    command: npm run dev
+    environment:
+      - NODE_ENV=development
+    ports:
+      - "${PORT:-3001}:${PORT:-3001}"
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    networks:
+      - videodowncut-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: videodowncut-postgres-dev
+    environment:
+      - POSTGRES_USER=${DB_USERNAME:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-postgres}
+      - POSTGRES_DB=${DB_NAME:-videodowncut_dev}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+    networks:
+      - videodowncut-network
+
+volumes:
+  postgres-dev-data:
+    name: videodowncut-postgres-dev-data 

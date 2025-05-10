@@ -1,0 +1,27 @@
+# Build outputs
+dist/
+build/
+coverage/
+
+# Node modules
+node_modules/
+
+# Package files
+package-lock.json
+yarn.lock
+
+# Uploaded files and logs
+uploads/
+logs/
+
+# Environment and configuration files
+.env
+.env.*
+!.env.example
+
+# Misc files
+.DS_Store
+.idea/
+.vscode/
+*.log 
+cookies.txt
