@@ -20,8 +20,7 @@ RUN npm run build
 FROM node:18-alpine
 
 # Install only required dependencies 
-RUN apk add --no-cache ffmpeg python3 py3-pip curl && \
-    pip3 install --no-cache-dir yt-dlp && \
+RUN apk add --no-cache ffmpeg python3 py3-pip curl yt-dlp && \
     rm -rf /tmp/* /var/cache/apk/*
 
 # Create a non-root user
