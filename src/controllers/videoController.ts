@@ -85,6 +85,7 @@ export const cutVideo = async (req: Request, res: Response, next: NextFunction) 
 // Stream video
 export const streamVideo = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    res.setHeader('ngrok-skip-browser-warning', 'any');
     const { videoId, filename } = req.params;
 
     // If filename is provided, stream a specific cut video
