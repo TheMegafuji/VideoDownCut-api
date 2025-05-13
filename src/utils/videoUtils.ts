@@ -63,6 +63,16 @@ export const extractVideoId = (url: string): string | null => {
         // For youtu.be URLs, the ID is in the pathname but might include ?si= or ?t=
         return urlObj.pathname.substring(1).split('?')[0];
       }
+      
+      // Handle YouTube Shorts URLs
+      if (urlObj.pathname.includes('/shorts/')) {
+        // Extract ID from /shorts/{videoId} path
+        const shortsMatch = urlObj.pathname.match(/\/shorts\/([a-zA-Z0-9_-]+)/);
+        if (shortsMatch && shortsMatch[1]) {
+          return shortsMatch[1];
+        }
+      }
+      
       return urlObj.searchParams.get('v');
     }
 

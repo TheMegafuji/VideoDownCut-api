@@ -32,7 +32,7 @@ const ensureVideoDirectory = async (videoId: string): Promise<string> => {
 export const downloadVideo = async (url: string): Promise<Video> => {
   try {
     // Extract video ID from URL
-    const videoId = videoUtils.extractVideoId(url);
+    let videoId = videoUtils.extractVideoId(url);
 
     if (!videoId) {
       throw new Error('Could not extract video ID from URL');
@@ -58,7 +58,22 @@ export const downloadVideo = async (url: string): Promise<Video> => {
     const videoDir = await ensureVideoDirectory(videoId);
 
     // Get video info
-    const videoInfo = await videoUtils.getVideoInfo(url);
+    let videoInfo = await videoUtils.getVideoInfo(url);
+
+    // --- INÍCIO DO AJUSTE PARA CARROSSEL/INSTAGRAM ---
+    // Se for carrossel (entries), pega o primeiro vídeo
+    if (videoInfo.entries && Array.isArray(videoInfo.entries)) {
+      // Procura o primeiro entry que seja vídeo
+      const firstVideoEntry = videoInfo.entries.find((entry: any) => entry.ext === 'mp4' || entry.vcodec !== 'none');
+      if (firstVideoEntry) {
+        videoInfo = firstVideoEntry;
+        url = firstVideoEntry.webpage_url || firstVideoEntry.url || url;
+        videoId = videoUtils.extractVideoId(url) || videoId;
+      } else {
+        throw new Error('Nenhum vídeo encontrado no carrossel do Instagram.');
+      }
+    }
+    // --- FIM DO AJUSTE ---
 
     // Download the video
     const filePath = await videoUtils.downloadVideo(url, videoDir);
