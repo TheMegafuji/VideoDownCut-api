@@ -25,6 +25,7 @@ export default {
   cutVideo: videoUtils.cutVideo,
   getVideoDuration: videoUtils.getVideoDuration,
   convertToMp3: videoUtils.convertToMp3,
+  cleanupPartFiles: videoUtils.cleanupPartFiles,
 
   // Validation utilities
   isValidVideoId: validationUtils.isValidVideoId,

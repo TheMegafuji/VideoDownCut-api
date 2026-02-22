@@ -11,24 +11,69 @@ export const generateFileHash = (videoId: string, url: string): string => {
   return crypto.createHash('sha256').update(`${videoId}-${url}`).digest('hex').substring(0, 16);
 };
 
-// Execute shell commands as a Promise
-export const execCommand = (command: string): Promise<string> => {
+// Clean up orphaned .part files before download
+export const cleanupPartFiles = async (outputPath: string, videoId?: string): Promise<void> => {
+  try {
+    if (!fs2.existsSync(outputPath)) {
+      return;
+    }
+
+    const files = await fs.readdir(outputPath);
+    const partFiles = files.filter(file => file.endsWith('.part'));
+    
+    for (const partFile of partFiles) {
+      // If videoId is specified, only clean up files for that video
+      if (videoId && !partFile.includes(videoId)) {
+        continue;
+      }
+      
+      const partPath = path.join(outputPath, partFile);
+      try {
+        await fs.unlink(partPath);
+        logger.info(`Cleaned up orphaned .part file: ${partFile}`);
+      } catch (error) {
+        logger.warn(`Could not remove .part file ${partFile}: ${error}`);
+      }
+    }
+  } catch (error) {
+    logger.warn(`Error during cleanup of .part files: ${error}`);
+  }
+};
+
+// Execute shell commands as a Promise with retry logic
+export const execCommand = (command: string, retries: number = 3): Promise<string> => {
   return new Promise((resolve, reject) => {
     logger.debug(`Executing command: ${command}`);
 
-    exec(
-      command,
-      { shell: 'cmd.exe', windowsHide: true },
-      (error: Error | null, stdout: string, stderr: string) => {
-        if (error) {
-          logger.error(`Command execution error with code ${(error as any).code}`);
-          logger.error(`stderr: ${stderr}`);
-          return reject(new Error(`Command failed with code ${(error as any).code}: ${stderr}`));
-        }
+    const attemptCommand = (attempt: number) => {
+      exec(
+        command,
+        { shell: 'cmd.exe', windowsHide: true },
+        (error: Error | null, stdout: string, stderr: string) => {
+          if (error) {
+            logger.error(`Command execution error with code ${(error as any).code} (attempt ${attempt}/${retries})`);
+            logger.error(`stderr: ${stderr}`);
+            
+            // Check if it's a file access error that might be retryable
+            const isRetryableError = stderr.includes('WinError 32') || 
+                                   stderr.includes('cannot access the file') ||
+                                   stderr.includes('being used by another process');
+            
+            if (isRetryableError && attempt < retries) {
+              logger.warn(`Retrying command in 2 seconds (attempt ${attempt + 1}/${retries})`);
+              setTimeout(() => attemptCommand(attempt + 1), 2000);
+              return;
+            }
+            
+            return reject(new Error(`Command failed with code ${(error as any).code}: ${stderr}`));
+          }
 
-        resolve(stdout);
-      },
-    );
+          resolve(stdout);
+        },
+      );
+    };
+
+    attemptCommand(1);
   });
 };
 
@@ -63,7 +108,7 @@ export const extractVideoId = (url: string): string | null => {
         // For youtu.be URLs, the ID is in the pathname but might include ?si= or ?t=
         return urlObj.pathname.substring(1).split('?')[0];
       }
-      
+
       // Handle YouTube Shorts URLs
       if (urlObj.pathname.includes('/shorts/')) {
         // Extract ID from /shorts/{videoId} path
@@ -72,7 +117,7 @@ export const extractVideoId = (url: string): string | null => {
           return shortsMatch[1];
         }
       }
-      
+
       return urlObj.searchParams.get('v');
     }
 
@@ -93,10 +138,30 @@ export const extractVideoId = (url: string): string | null => {
     if (urlObj.hostname.includes('tiktok.com')) {
       // Handle vm.tiktok.com short URLs
       if (urlObj.hostname.includes('vm.tiktok.com')) {
-        // For short URLs, use the last path segment
+        // For short URLs, extract the code from the path and add tiktok_ prefix
         const pathSegments = urlObj.pathname.split('/').filter(Boolean);
         if (pathSegments.length > 0) {
-          return `tiktok_${pathSegments[pathSegments.length - 1]}`;
+          // Get last segment of path (the short code)
+          const shortCode = pathSegments[pathSegments.length - 1];
+          return `tiktok_${shortCode}`;
+        } else {
+          // Default to hostname when path is empty
+          const originSegments = urlObj.hostname.split('.');
+          return `tiktok_${originSegments[0]}`;
+        }
+      }
+
+      // Handle redirection URLs
+      if (urlObj.pathname.includes('/login')) {
+        const redirectUrl = urlObj.searchParams.get('redirect_url');
+        if (redirectUrl) {
+          try {
+            // Try to extract ID from the redirect URL
+            const decodedUrl = decodeURIComponent(redirectUrl);
+            return extractVideoId(decodedUrl);
+          } catch (e) {
+            logger.error(`Failed to extract TikTok ID from redirect URL: ${e}`);
+          }
         }
       }
 
@@ -104,6 +169,12 @@ export const extractVideoId = (url: string): string | null => {
       const videoMatch = urlObj.pathname.match(/\/@[^\/]+\/video\/(\d+)/);
       if (videoMatch && videoMatch[1]) {
         return `tiktok_${videoMatch[1]}`;
+      }
+
+      // Handle embed URLs
+      const embedMatch = urlObj.pathname.match(/\/embed\/v2\/(\d+)/);
+      if (embedMatch && embedMatch[1]) {
+        return `tiktok_${embedMatch[1]}`;
       }
     }
 
@@ -116,9 +187,18 @@ export const extractVideoId = (url: string): string | null => {
       }
     }
 
+    // For URLs we can't specifically identify, generate a hash
+    // Make sure to handle TikTok short URLs as a special case
+    if (url.includes('vm.tiktok.com')) {
+      // Extract the short code from the URL for consistent IDs
+      const shortUrlMatch = url.match(/vm\.tiktok\.com\/([A-Za-z0-9_-]+)/);
+      if (shortUrlMatch && shortUrlMatch[1]) {
+        return `tiktok_${shortUrlMatch[1]}`;
+      }
+    }
+
     // Generate a hash for other URLs
     const urlHash = crypto.createHash('md5').update(url).digest('hex').substring(0, 12);
-
     return `url_${urlHash}`;
   } catch (error) {
     logger.error(`Failed to extract video ID: ${error}`);
@@ -126,10 +206,91 @@ export const extractVideoId = (url: string): string | null => {
   }
 };
 
-// Get video info via yt-dlp
+// Get video info via yt-dlp with fallback for TikTok
 export const getVideoInfo = async (url: string): Promise<any> => {
   try {
-    // Check cookie and authentication settings
+    // Check if it's a TikTok URL
+    const isTikTok = url.includes('tiktok.com') || url.includes('vm.tiktok');
+    
+    // Check if it's a YouTube Shorts URL
+    const isYouTubeShorts = url.includes('youtube.com/shorts/') || url.includes('youtu.be/') && url.includes('shorts');
+
+    // Clean TikTok URLs first to avoid login redirects
+    if (isTikTok) {
+      url = await cleanTikTokUrl(url);
+      logger.info(`Using cleaned TikTok URL: ${url}`);
+    }
+
+    // For TikTok URLs, create a custom fallback info if yt-dlp fails
+    if (isTikTok) {
+      try {
+        // Try yt-dlp first
+        logger.info('Attempting to get TikTok video info with yt-dlp');
+
+        // Check cookie and authentication settings
+        const cookieArgs: string[] = [];
+
+        // If browser and profile are configured, use browser cookies
+        if (env.cookiesBrowser) {
+          cookieArgs.push(`--cookies-from-browser ${env.cookiesBrowser}`);
+
+          // Add specific profile if provided
+          if (env.cookiesProfile) {
+            cookieArgs.push(`--cookies-from-browser ${env.cookiesBrowser}:${env.cookiesProfile}`);
+          }
+        }
+        // If cookie file is configured, use that file
+        else if (env.cookiesFile && fs2.existsSync(env.cookiesFile)) {
+          logger.info(`Using cookies file for video info: ${env.cookiesFile}`);
+          cookieArgs.push(`--cookies "${env.cookiesFile}"`);
+        } else {
+          logger.warn('No cookies configuration found for TikTok video info');
+        }
+
+        let ytDlpCommand = 'yt-dlp --dump-json';
+        ytDlpCommand += ' --no-check-certificates --ignore-errors --no-warnings --no-part --no-mtime';
+        ytDlpCommand +=
+          ' --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"';
+        ytDlpCommand += ' --referer "https://www.tiktok.com/"';
+
+        // Add cookie arguments if available
+        if (cookieArgs.length > 0) {
+          ytDlpCommand += ` ${cookieArgs.join(' ')}`;
+        }
+
+        ytDlpCommand += ` "${url.replace(/"/g, '\\"')}"`;
+
+        const output = await execCommand(ytDlpCommand);
+        return JSON.parse(output);
+      } catch (ytDlpError) {
+        logger.warn(`yt-dlp failed to get TikTok info: ${ytDlpError}. Creating fallback info.`);
+
+        // Create a basic info object for TikTok videos when yt-dlp fails
+        const videoId = extractVideoId(url) || 'tiktok_unknown';
+
+        // Return minimal information object with default values
+        // No need to try complex HTML extraction which won't work cross-platform
+        return {
+          id: videoId,
+          title: 'TikTok Video',
+          description: 'Downloaded from TikTok',
+          thumbnail: '',
+          duration: 0, // We don't know the duration yet
+          formats: [],
+          // Add minimal required fields
+          _type: 'video',
+          extractor: 'tiktok',
+          extractor_key: 'TikTok',
+          webpage_url: url,
+          ext: 'mp4',
+        };
+      }
+    }
+
+    // Standard logic for non-TikTok videos (including YouTube Shorts, Instagram)
+    const isInstagram = url.includes('instagram.com');
+
+    // Check cookie and authentication settings (Instagram often requires login/cookies)
     const cookieArgs: string[] = [];
 
     // If browser and profile are configured, use browser cookies
@@ -146,8 +307,28 @@ export const getVideoInfo = async (url: string): Promise<any> => {
       cookieArgs.push('--cookies', env.cookiesFile);
     }
 
-    // Create a single command with all parts
-    let fullCommand = 'yt-dlp --dump-json';
+    if (isInstagram && cookieArgs.length === 0) {
+      logger.warn('Instagram URL detected but no cookies configured. Set COOKIES_BROWSER or COOKIES_FILE for best results.');
+    }
+
+    // Create a single command with all parts (with Windows file handling)
+    // Add extra flags for YouTube Shorts to ensure compatibility
+    let fullCommand = 'yt-dlp --dump-json --no-part --no-mtime';
+
+    // Instagram: referer and user-agent improve extraction (yt-dlp docs)
+    if (isInstagram) {
+      fullCommand +=
+        ' --referer "https://www.instagram.com/" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"';
+      logger.info('Detected Instagram URL, using referer and cookies');
+    }
+
+    // Add flags for better YouTube Shorts support
+    // Using android client for better compatibility with Shorts
+    if (isYouTubeShorts) {
+      // Escape quotes properly for Windows cmd.exe
+      fullCommand += ' --extractor-args youtube:player_client=android';
+      logger.info('Detected YouTube Shorts URL, using optimized flags');
+    }
 
     if (cookieArgs.length > 0) {
       fullCommand += ' ' + cookieArgs.join(' ');
@@ -157,24 +338,243 @@ export const getVideoInfo = async (url: string): Promise<any> => {
     fullCommand += ` "${url.replace(/"/g, '\\"')}"`;
 
     logger.debug(`Executing command: ${fullCommand}`);
-    const output = await execCommand(fullCommand);
-    return JSON.parse(output);
-  } catch (error) {
-    logger.error(`Failed to get video info: ${error}`);
+    try {
+      const output = await execCommand(fullCommand);
+      return JSON.parse(output);
+    } catch (execError: any) {
+      // Enhanced error logging for better debugging
+      const errorMessage = execError?.message || String(execError);
+      const errorStack = execError?.stack || '';
+      logger.error(`yt-dlp command failed: ${errorMessage}`);
+      logger.error(`Command was: ${fullCommand}`);
+      if (errorStack) {
+        logger.error(`Stack trace: ${errorStack}`);
+      }
+      
+      // Re-throw with more context
+      const enhancedError = new Error(`Failed to get video info: ${errorMessage}`);
+      (enhancedError as any).originalError = execError;
+      (enhancedError as any).command = fullCommand;
+      throw enhancedError;
+    }
+  } catch (error: any) {
+    // Enhanced error logging
+    const errorMessage = error?.message || String(error);
+    const errorDetails = error?.originalError ? error.originalError.message : '';
+    logger.error(`Failed to get video info for URL: ${url}`);
+    logger.error(`Error: ${errorMessage}`);
+    if (errorDetails) {
+      logger.error(`Original error: ${errorDetails}`);
+    }
+    if (error?.stack) {
+      logger.error(`Stack: ${error.stack}`);
+    }
     throw error;
   }
 };
 
-// Download video via yt-dlp
+// Fallback method for TikTok using direct video download with ffmpeg
+export const directTikTokDownload = async (
+  url: string,
+  outputPath: string,
+  videoId: string,
+): Promise<string> => {
+  try {
+    logger.info(`Attempting direct TikTok download for: ${url}`);
+
+    // Define output file path
+    const outputFilePath = path.join(outputPath, `${videoId}.mp4`);
+
+    // Check cookie and authentication settings
+    const cookieArgs: string[] = [];
+
+    // If browser and profile are configured, use browser cookies
+    if (env.cookiesBrowser) {
+      cookieArgs.push(`--cookies-from-browser ${env.cookiesBrowser}`);
+
+      // Add specific profile if provided
+      if (env.cookiesProfile) {
+        cookieArgs.push(`--cookies-from-browser ${env.cookiesBrowser}:${env.cookiesProfile}`);
+      }
+    }
+    // If cookie file is configured, use that file
+    else if (env.cookiesFile && fs2.existsSync(env.cookiesFile)) {
+      logger.info(`Using cookies file for direct download: ${env.cookiesFile}`);
+      cookieArgs.push(`--cookies "${env.cookiesFile}"`);
+    } else {
+      logger.warn('No cookies configuration found for direct TikTok download');
+    }
+
+    // Use yt-dlp with all possible options to maximize chance of success (with Windows file handling)
+    let ytDlpCommand = `yt-dlp --force-overwrites --no-check-certificates --ignore-errors --no-warnings --no-playlist --no-part --no-mtime --concurrent-fragments 1 --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36" --referer "https://www.tiktok.com/" --add-header "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7" --add-header "Accept-Language: en-US,en;q=0.9"`;
+
+    // Add cookie arguments if available
+    if (cookieArgs.length > 0) {
+      ytDlpCommand += ` ${cookieArgs.join(' ')}`;
+    }
+
+    ytDlpCommand += ` -o "${outputFilePath}" "${url}"`;
+
+    logger.debug(`Running download command: ${ytDlpCommand}`);
+    await execCommand(ytDlpCommand);
+
+    logger.info(`Successfully downloaded TikTok video to: ${outputFilePath}`);
+
+    return outputFilePath;
+  } catch (error) {
+    logger.error(`Failed direct TikTok download: ${error}`);
+    throw error;
+  }
+};
+
+// Download video via yt-dlp with fallback to ffmpeg for TikTok
 export const downloadVideo = async (
   url: string,
   outputPath: string,
-  format: string = 'best',
+  format?: string,
 ): Promise<string> => {
   try {
+    // Extract video ID for cleanup
+    const initialVideoId = extractVideoId(url);
+    
+    // Clean up any orphaned .part files first
+    if (initialVideoId) {
+      await cleanupPartFiles(outputPath, initialVideoId);
+    }
+
+    // Check if it's a TikTok URL
+    const isTikTok = url.includes('tiktok.com') || url.includes('vm.tiktok');
+    const isShortTikTok = url.includes('vm.tiktok.com');
+
+    // Clean TikTok URLs only if they have login redirects
+    // Don't clean embed URLs as yt-dlp doesn't support them anyway
+    // Only clean if it's a login redirect URL
+    if (isTikTok && url.includes('tiktok.com/login?redirect_url=')) {
+      url = await cleanTikTokUrl(url);
+      logger.info(`Using cleaned TikTok URL for download: ${url}`);
+    } else if (isTikTok && url.includes('tiktok.com/embed/v2/')) {
+      // If it's an embed URL, warn but don't try to clean it
+      logger.warn(`TikTok embed URL detected - yt-dlp does not support this format: ${url}`);
+      logger.warn(`Please use the original TikTok URL format: https://www.tiktok.com/@username/video/{id}`);
+    }
+
+    // For TikTok URLs, try the yt-dlp approach
+    if (isTikTok) {
+      try {
+        // Get video ID (for file naming)
+        const videoId = extractVideoId(url);
+        if (!videoId) {
+          throw new Error('Could not extract video ID from TikTok URL');
+        }
+
+        logger.info(`Attempting download for TikTok: ${url}`);
+
+        // Check cookie and authentication settings
+        const cookieArgs: string[] = [];
+
+        // If browser and profile are configured, use browser cookies
+        if (env.cookiesBrowser) {
+          cookieArgs.push(`--cookies-from-browser ${env.cookiesBrowser}`);
+
+          // Add specific profile if provided
+          if (env.cookiesProfile) {
+            cookieArgs.push(`--cookies-from-browser ${env.cookiesBrowser}:${env.cookiesProfile}`);
+          }
+        }
+        // If cookie file is configured, use that file
+        else if (env.cookiesFile && fs2.existsSync(env.cookiesFile)) {
+          logger.info(`Using cookies file: ${env.cookiesFile}`);
+          cookieArgs.push(`--cookies "${env.cookiesFile}"`);
+        } else {
+          logger.warn('No cookies configuration found for TikTok download');
+        }
+
+        // Short TikTok URLs need special handling
+        if (isShortTikTok) {
+          // For short URLs, use the simple direct download approach
+          // This uses yt-dlp with lots of options to try to handle the URL
+          const simpleOutputPath = path.join(outputPath, `${videoId}.mp4`);
+
+          let ytDlpSimpleCommand = `yt-dlp --force-overwrites --no-check-certificates --ignore-errors --no-warnings --no-check-formats --concurrent-fragments 1 --no-part --no-mtime --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"`;
+
+          // Add cookie arguments if available
+          if (cookieArgs.length > 0) {
+            ytDlpSimpleCommand += ` ${cookieArgs.join(' ')}`;
+          }
+
+          ytDlpSimpleCommand += ` -o "${simpleOutputPath}" "${url}"`;
+
+          logger.debug(`Executing yt-dlp simple command: ${ytDlpSimpleCommand}`);
+          await execCommand(ytDlpSimpleCommand);
+
+          // Check if the file was created
+          if (fs2.existsSync(simpleOutputPath)) {
+            logger.info(`TikTok download successful: ${simpleOutputPath}`);
+            return simpleOutputPath;
+          }
+
+          throw new Error('yt-dlp download did not produce output file');
+        }
+
+        // For regular TikTok URLs, use the normal approach
+        const outputTemplate = path.join(outputPath, '%(id)s.%(ext)s');
+
+        // Attempt with yt-dlp (optimized for TikTok with Windows file handling)
+        // Don't specify format to avoid "best" warning - let yt-dlp choose automatically
+        let ytDlpCommand = 'yt-dlp';
+        ytDlpCommand += ' --no-check-certificates --ignore-errors --no-warnings';
+        ytDlpCommand += ' --no-part --force-overwrites --no-mtime --concurrent-fragments 1'; // Windows file handling improvements
+        ytDlpCommand +=
+          ' --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"';
+        ytDlpCommand += ' --referer "https://www.tiktok.com/"';
+
+        // Add cookie arguments if available
+        if (cookieArgs.length > 0) {
+          ytDlpCommand += ` ${cookieArgs.join(' ')}`;
+        }
+
+        ytDlpCommand += ` -o "${outputTemplate}" "${url.replace(/"/g, '\\"')}"`;
+
+        try {
+          logger.debug(`Executing yt-dlp command: ${ytDlpCommand}`);
+          const output = await execCommand(ytDlpCommand);
+          logger.info(`Primary TikTok download completed: ${url}`);
+
+          // Check if download was successful
+          const downloadedFile = output.match(/\[download\] Destination: (.+)/);
+          if (downloadedFile && downloadedFile[1]) {
+            return downloadedFile[1];
+          }
+
+          // If no file found in output, look in directory
+          const files = await fs.readdir(outputPath);
+          const matchingFiles = files.filter(file => file.startsWith(videoId));
+
+          if (matchingFiles.length > 0) {
+            return path.join(outputPath, matchingFiles[0]);
+          }
+
+          // If we get here, yt-dlp didn't work, try the fallback
+          throw new Error('yt-dlp download did not produce output file');
+        } catch (ytDlpError) {
+          // yt-dlp failed, try direct method
+          logger.warn(`yt-dlp failed for TikTok: ${ytDlpError}. Trying fallback method.`);
+          return await directTikTokDownload(url, outputPath, videoId);
+        }
+      } catch (tiktokError) {
+        logger.error(`All TikTok download methods failed: ${tiktokError}`);
+        throw tiktokError;
+      }
+    }
+
+    // Regular non-TikTok download logic (including YouTube Shorts, Instagram)
     const outputTemplate = path.join(outputPath, '%(id)s.%(ext)s');
 
-    // Check cookie and authentication settings
+    // Check if it's a YouTube Shorts URL or Instagram
+    const isYouTubeShorts = url.includes('youtube.com/shorts/') || (url.includes('youtu.be/') && url.includes('shorts'));
+    const isInstagram = url.includes('instagram.com');
+
+    // Check cookie and authentication settings (Instagram often requires cookies)
     const cookieArgs: string[] = [];
 
     // If browser and profile are configured, use browser cookies
@@ -191,8 +591,23 @@ export const downloadVideo = async (
       cookieArgs.push('--cookies', env.cookiesFile);
     }
 
-    // Create a single command with all parts
-    let fullCommand = `yt-dlp -f ${format}`;
+    // Create a single command with all parts (with Windows file handling improvements)
+    // Don't specify format to avoid "best" warning - let yt-dlp choose automatically
+    let fullCommand = 'yt-dlp';
+    fullCommand += ' --no-part --force-overwrites --no-mtime --concurrent-fragments 1'; // Windows file handling improvements
+
+    // Instagram: referer and user-agent (yt-dlp docs recommend for Instagram)
+    if (isInstagram) {
+      fullCommand +=
+        ' --referer "https://www.instagram.com/" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"';
+      logger.info('Detected Instagram URL for download, using referer and cookies');
+    }
+
+    // Add flags for better YouTube Shorts support
+    if (isYouTubeShorts) {
+      fullCommand += ' --extractor-args youtube:player_client=android';
+      logger.info('Detected YouTube Shorts URL, using optimized flags for download');
+    }
 
     if (cookieArgs.length > 0) {
       fullCommand += ' ' + cookieArgs.join(' ');
@@ -207,25 +622,58 @@ export const downloadVideo = async (
     logger.info(`Starting download: ${url}`);
     logger.debug(`Executing command: ${fullCommand}`);
 
-    const output = await execCommand(fullCommand);
-    logger.info(`Download completed: ${url}`);
+    let output: string;
+    try {
+      output = await execCommand(fullCommand);
+      logger.info(`Download completed: ${url}`);
+    } catch (execError: any) {
+      // Enhanced error logging for better debugging
+      const errorMessage = execError?.message || String(execError);
+      logger.error(`yt-dlp download failed: ${errorMessage}`);
+      logger.error(`Command was: ${fullCommand}`);
+      if (execError?.stack) {
+        logger.error(`Stack trace: ${execError.stack}`);
+      }
+      
+      // Re-throw with more context
+      const enhancedError = new Error(`Failed to download video: ${errorMessage}`);
+      (enhancedError as any).originalError = execError;
+      (enhancedError as any).command = fullCommand;
+      throw enhancedError;
+    }
+
+    // Clean up any remaining .part files after download
+    if (initialVideoId) {
+      await cleanupPartFiles(outputPath, initialVideoId);
+    }
 
     // Extract the file path from yt-dlp output
     const downloadedFile = output.match(/\[download\] Destination: (.+)/);
     if (downloadedFile && downloadedFile[1]) {
-      return downloadedFile[1];
+      // Verify the file actually exists
+      const filePath = downloadedFile[1].trim();
+      if (fs2.existsSync(filePath)) {
+        return filePath;
+      }
     }
 
     // If we can't parse the output, find the latest file in the directory
     const files = await fs.readdir(outputPath);
     const videoId = extractVideoId(url);
-    const matchingFiles = files.filter(file => file.startsWith(videoId as string));
+    const matchingFiles = files.filter(file => file.startsWith(videoId as string) && !file.endsWith('.part'));
 
     if (matchingFiles.length === 0) {
       throw new Error('Downloaded file not found');
     }
 
-    return path.join(outputPath, matchingFiles[0]);
+    const finalPath = path.join(outputPath, matchingFiles[0]);
+    
+    // Verify the final file exists
+    if (!fs2.existsSync(finalPath)) {
+      throw new Error('Downloaded file verification failed');
+    }
+
+    return finalPath;
   } catch (error) {
     logger.error(`Failed to download video: ${error}`);
     throw error;
@@ -402,6 +850,56 @@ export const convertToMp3 = async (
   }
 };
 
+// Clean and fix TikTok URLs that redirect to login pages
+// NOTE: yt-dlp does NOT support embed URLs (https://www.tiktok.com/embed/v2/{id})
+// yt-dlp requires the original TikTok URL format: https://www.tiktok.com/@username/video/{id}
+// We should only clean URLs that have login redirects, otherwise keep the original format
+export const cleanTikTokUrl = async (url: string): Promise<string> => {
+  try {
+    // Check if it's a TikTok URL with login redirect - this is the only case we need to clean
+    if (url.includes('tiktok.com/login?redirect_url=')) {
+      logger.info(`Detected TikTok login redirect URL: ${url}`);
+
+      // Extract the original URL from the redirect_url parameter
+      const urlObj = new URL(url);
+      const redirectUrl = urlObj.searchParams.get('redirect_url');
+
+      if (redirectUrl) {
+        // Decode the URL
+        const decodedUrl = decodeURIComponent(redirectUrl);
+        logger.info(`Extracted original TikTok URL from redirect: ${decodedUrl}`);
+        
+        // Return the decoded URL - this should be in the correct format for yt-dlp
+        return decodedUrl;
+      }
+    }
+    // If it's an embed URL, we cannot convert it back without the username
+    // In this case, we should NOT clean it and let the caller handle the error
+    else if (url.includes('tiktok.com/embed/v2/')) {
+      logger.warn(`Detected TikTok embed URL (not supported by yt-dlp): ${url}`);
+      logger.warn(`Embed URLs cannot be converted back to standard format without username`);
+      // Return as-is and let yt-dlp handle the error with a clear message
+      return url;
+    }
+    // For all other TikTok URLs (including vm.tiktok.com and standard URLs)
+    // Return as-is - yt-dlp can handle them if they're in the correct format
+    // Supported formats:
+    // - https://www.tiktok.com/@username/video/{id}
+    // - https://vm.tiktok.com/{code}
+    else if (url.includes('tiktok.com') || url.includes('vm.tiktok')) {
+      logger.info(`Using original TikTok URL format (no cleaning needed): ${url}`);
+      return url;
+    }
+
+    // Return original URL if no conversion was possible
+    return url;
+  } catch (error) {
+    logger.error(`Error cleaning TikTok URL: ${error}`);
+    // Return the original URL if there was an error
+    return url;
+  }
+};
+
 export default {
   generateFileHash,
   execCommand,
@@ -414,4 +912,7 @@ export default {
   getVideoDuration,
   cleanupOldVideos,
   convertToMp3,
+  cleanTikTokUrl,
+  directTikTokDownload,
+  cleanupPartFiles,
 };

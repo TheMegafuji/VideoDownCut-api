@@ -273,6 +273,65 @@ export const downloadOriginalVideo = async (req: Request, res: Response, next: N
   }
 };
 
+// Check video file size
+export const checkVideoFileSize = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // Validate request
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      const error = new Error('Validation Error') as ApiError;
+      error.statusCode = 400;
+      error.details = errors.array();
+      return next(error);
+    }
+
+    const { url } = req.body;
+
+    // Get video file size
+    const sizeInfo = await videoService.getVideoFileSize(url);
+
+    // Return file size information
+    res.status(200).json({
+      success: true,
+      data: {
+        url: sizeInfo.url,
+        size: sizeInfo.size,
+        formattedSize: sizeInfo.formattedSize,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get video information by ID
+export const getVideoInfoById = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { videoId } = req.params;
+
+    // Get video info
+    const videoInfo = await videoService.getVideoInfo(videoId);
+
+    // Get original video filename
+    const filename = path.basename(videoInfo.filePath);
+
+    // Return video information
+    res.status(200).json({
+      success: true,
+      data: {
+        videoId: videoInfo.videoId,
+        title: videoInfo.title,
+        duration: videoInfo.duration,
+        thumbnail: videoInfo.thumbnail,
+        formats: videoInfo.formats,
+        downloadUrl: `/api/videos/download/${videoInfo.videoId}/${filename}`,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export default {
   downloadVideo,
   cutVideo,
@@ -280,4 +339,6 @@ export default {
   downloadMp3,
   downloadFile,
   downloadOriginalVideo,
+  checkVideoFileSize,
+  getVideoInfoById,
 };
